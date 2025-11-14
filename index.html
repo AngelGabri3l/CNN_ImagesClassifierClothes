@@ -4,7 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>👕 Clasificador Fashion MNIST (ONNX)</title>
+  
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js"></script>
+  
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -22,25 +24,31 @@
       width: 280px; height: 280px;
       cursor: crosshair;
       border-radius: 10px;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); /* Añadido para mejor visual */
     }
     input, button {
       padding: 10px 15px;
       font-size: 16px;
       border-radius: 8px;
       border: none;
+      transition: background-color 0.3s;
     }
     button {
       cursor: pointer;
       background-color: #333;
       color: white;
     }
-    .result { margin-top: 30px; font-size: 20px; }
+    button:hover {
+        background-color: #555;
+    }
+    .result { margin-top: 30px; font-size: 20px; font-weight: bold; color: #007bff; }
   </style>
 </head>
 <body>
   <h1>🧥 Clasificador Fashion MNIST (ONNX)</h1>
   <div class="container">
     <input type="file" id="upload" accept="image/*" />
+    <p>O dibuja directamente en el lienzo (28x28)</p>
     <canvas id="canvas" width="280" height="280"></canvas>
     <div>
       <button id="clear">🧹 Limpiar</button>
@@ -54,6 +62,7 @@
   </div>
 
   <script>
+    // Nombres de las clases del dataset Fashion MNIST
     const labels = [
       "T-shirt/Top", "Trouser", "Pullover", "Dress", "Coat",
       "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"
@@ -69,21 +78,31 @@
     let session;
     let drawing = false;
 
-    // --- Cargar modelo ONNX ---
+    // --- Cargar modelo ONNX (usando la ruta local del archivo) ---
     async function loadModel() {
       try {
         output.textContent = "Cargando modelo ONNX...";
-        session = await ort.InferenceSession.create("./cnn_fashion.onnx");
+        // La ruta es relativa al archivo HTML
+        session = await ort.InferenceSession.create("./cnn_fashion.onnx"); 
         output.textContent = "Modelo cargado ✅ ¡Dibuja o sube una imagen!";
       } catch (e) {
-        console.error(e);
-        output.textContent = "Error al cargar el modelo 😢";
+        console.error("Error al cargar el modelo:", e);
+        // Si el modelo falla al cargar, esto es visible al usuario
+        output.textContent = "Error al cargar el modelo 😢 (Revisa la consola)";
       }
     }
     loadModel();
 
-    // --- Dibujo manual ---
-    canvas.addEventListener("mousedown", () => (drawing = true));
+    // --- Configuración de Dibujo ---
+    ctx.lineWidth = 15; // Grosor del pincel
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = 'black';
+    
+    // Eventos de dibujo
+    canvas.addEventListener("mousedown", (e) => {
+        drawing = true;
+        draw(e); // Dibuja el primer punto inmediatamente
+    });
     canvas.addEventListener("mouseup", () => (drawing = false));
     canvas.addEventListener("mouseleave", () => (drawing = false));
     canvas.addEventListener("mousemove", draw);
@@ -91,11 +110,17 @@
     function draw(e) {
       if (!drawing) return;
       const rect = canvas.getBoundingClientRect();
-      ctx.fillStyle = "black";
+      ctx.lineTo(e.clientX - rect.left, e.clientY - rect.top);
+      ctx.stroke();
       ctx.beginPath();
-      ctx.arc(e.clientX - rect.left, e.clientY - rect.top, 10, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.moveTo(e.clientX - rect.left, e.clientY - rect.top);
     }
+
+    // Al iniciar el mouse, resetea la ruta de dibujo
+    canvas.addEventListener("mousedown", () => {
+        ctx.beginPath();
+    });
+
 
     // --- Limpiar canvas ---
     clearBtn.addEventListener("click", () => {
@@ -110,7 +135,12 @@
       if (!file) return;
       const img = new Image();
       img.onload = () => {
+        // Limpiar lienzo antes de dibujar la imagen subida
+        ctx.fillStyle = "white";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // Dibujar la imagen sobre el canvas
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        output.textContent = "Imagen lista para predecir.";
       };
       img.src = URL.createObjectURL(file);
     });
@@ -118,41 +148,57 @@
     // --- Predicción ---
     predictBtn.addEventListener("click", async () => {
       if (!session) {
-        alert("Modelo no cargado aún");
+        alert("Modelo no cargado aún. Espera o revisa la consola.");
         return;
       }
+      
+      output.textContent = "Prediciendo...";
 
-      // Escalar a 28x28 y convertir a escala de grises (invertido)
+      // 1. Escalar a 28x28 (el tamaño de entrada del modelo)
       const tmpCanvas = document.createElement("canvas");
       tmpCanvas.width = 28;
       tmpCanvas.height = 28;
       const tmpCtx = tmpCanvas.getContext("2d");
-      tmpCtx.drawImage(canvas, 0, 0, 28, 28);
+      // Dibuja el contenido del canvas grande en el canvas pequeño
+      tmpCtx.drawImage(canvas, 0, 0, 28, 28); 
+      
+      // 2. Obtener los datos del píxel y preprocesar
       const imgData = tmpCtx.getImageData(0, 0, 28, 28);
-      const gray = new Float32Array(1 * 1 * 28 * 28);
+      const gray = new Float32Array(1 * 1 * 28 * 28); // Formato (1, 1, 28, 28)
 
       for (let i = 0; i < imgData.data.length; i += 4) {
+        // Calcula el promedio RGB para obtener la escala de grises
         const avg = (imgData.data[i] + imgData.data[i + 1] + imgData.data[i + 2]) / 3;
-        // invertimos los colores (porque el modelo fue entrenado con fondo negro)
+        // Invertir (fondo negro, dibujo blanco) y normalizar (0 a 1)
         gray[i / 4] = (255 - avg) / 255.0;
       }
 
+      // 3. Crear Tensor ONNX
       const tensor = new ort.Tensor("float32", gray, [1, 1, 28, 28]);
-      const results = await session.run({ input: tensor });
-      const outputData = results.output.data;
+      
+      // 4. Ejecutar el modelo
+      try {
+          const results = await session.run({ input: tensor });
+          const outputData = results.output.data;
+  
+          // 5. Aplicar Softmax y encontrar la predicción
+          const expScores = outputData.map(Math.exp);
+          const sumExp = expScores.reduce((a, b) => a + b, 0);
+          const probs = expScores.map(v => v / sumExp);
+  
+          const maxIndex = probs.indexOf(Math.max(...probs));
+          const confidence = (probs[maxIndex] * 100).toFixed(2);
+          
+          output.textContent = `Predicción: ${labels[maxIndex]} (${confidence}%) 👕`;
+          
+      } catch (e) {
+          console.error("Error durante la inferencia:", e);
+          output.textContent = "Error en la predicción 😥";
+      }
 
-      // Softmax para probabilidades
-      const expScores = outputData.map(Math.exp);
-      const sumExp = expScores.reduce((a, b) => a + b, 0);
-      const probs = expScores.map(v => v / sumExp);
-
-      // Índice con mayor probabilidad
-      const maxIndex = probs.indexOf(Math.max(...probs));
-      const confidence = (probs[maxIndex] * 100).toFixed(2);
-      output.textContent = `Predicción: ${labels[maxIndex]} (${confidence}%) 👕`;
     });
 
-    // Fondo blanco inicial
+    // Fondo blanco inicial al cargar la página
     ctx.fillStyle = "white";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   </script>
